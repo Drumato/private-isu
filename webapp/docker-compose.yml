@@ -41,6 +41,9 @@ services:
       - mysql:/var/lib/mysql
       - ./etc/my.cnf:/etc/my.cnf
       - ./sql:/docker-entrypoint-initdb.d
+      - type: bind
+        source: ./mysql-log
+        target: /var/log/mysql/
     ports:
       - "3306:3306"
     deploy:
