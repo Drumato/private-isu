@@ -53,7 +53,7 @@ type Post struct {
 	CreatedAt    time.Time `db:"created_at"`
 	CommentCount int
 	Comments     []Comment
-	User         User
+	User         User `db:"users"`
 	CSRFToken    string
 }
 
@@ -172,37 +172,55 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 }
 
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+	postIDs := make([]int, len(results))
+	for i := range results {
+		postIDs[i] = results[i].ID
+	}
 
+	commentsInPostResults := make([]Comment, len(results))
+	// we query with "ORDER BY `created_at` DESC", so the each post is corresponding with the each comment
+	sql, params, err := sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC ", postIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Select(&commentsInPostResults, sql, params...); err != nil {
+		return nil, err
+	}
+
+	// posts.id -> Post
+	postMap := make(map[int]Post)
+	for _, comment := range commentsInPostResults {
+		if _, ok := postMap[comment.PostID]; !ok {
+			postMap[comment.PostID] = Post{
+				Comments: make([]Comment, 0),
+			}
+		}
+
+		{
+			p := postMap[comment.PostID]
+			p.Comments = append(p.Comments, comment)
+			postMap[comment.PostID] = p
+		}
+	}
+
+	posts := make([]Post, 0)
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
-		}
+		commentsInPost := postMap[p.ID].Comments
+		p.CommentCount = len(commentsInPost)
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		for i := 0; i < len(comments); i++ {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
+		for i := 0; i < len(commentsInPost); i++ {
+			err := db.Get(&commentsInPost[i].User, "SELECT * FROM `users` WHERE `id` = ?", commentsInPost[i].UserID)
 			if err != nil {
 				return nil, err
 			}
 		}
 
 		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
+		for i, j := 0, len(commentsInPost)-1; i < j; i, j = i+1, j-1 {
+			commentsInPost[i], commentsInPost[j] = commentsInPost[j], commentsInPost[i]
 		}
 
-		p.Comments = comments
+		p.Comments = commentsInPost
 
 		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
 		if err != nil {
@@ -386,7 +404,11 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	err := db.Select(&results,
+		"SELECT posts.id, posts.user_id, posts.body, posts.mime, posts.created_at FROM posts"+
+		" STRAIGHT_JOIN users ON posts.user_id = users.id"+
+		" WHERE users.del_flg = 0"+
+		" ORDER BY posts.created_at DESC LIMIT 20")
 	if err != nil {
 		log.Print(err)
 		return
@@ -520,7 +542,12 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.Select(&results,
+		"SELECT posts.id, posts.user_id, posts.body, posts.mime, posts.created_at FROM posts"+
+		" FORCE INDEX (created_at_desc_index) JOIN users ON posts.user_id = users.id"+
+		" WHERE users.del_flg = 0"+
+		" AND posts.created_at <= ?"+
+		" ORDER BY `created_at` DESC LIMIT 20", t.Format(ISO8601Format))
 	if err != nil {
 		log.Print(err)
 		return
