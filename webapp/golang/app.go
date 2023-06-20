@@ -173,18 +173,44 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	postIDs := make([]int, len(results))
+	userIDsInPosts := make([]int, len(results))
 	for i := range results {
 		postIDs[i] = results[i].ID
+		userIDsInPosts[i] = results[i].UserID
 	}
 
-	commentsInPostResults := make([]Comment, len(results))
-	// we query with "ORDER BY `created_at` DESC", so the each post is corresponding with the each comment
+	commentsInPostResults := make([]Comment, 0)
 	sql, params, err := sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC ", postIDs)
 	if err != nil {
 		return nil, err
 	}
 	if err := db.Select(&commentsInPostResults, sql, params...); err != nil {
 		return nil, err
+	}
+
+	usersInPostResults := make([]User, 0)
+	sql, params, err = sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDsInPosts)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Select(&usersInPostResults, sql, params...); err != nil {
+		return nil, err
+	}
+
+	userIDsInComments := make([]int, len(commentsInPostResults))
+	for i := range commentsInPostResults {
+		userIDsInComments[i] = commentsInPostResults[i].UserID
+	}
+
+	usersInComments := make([]User, 0)
+	if len(userIDsInComments) != 0 {
+		sql, params, err = sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDsInComments)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.Select(&usersInComments, sql, params...); err != nil {
+			return nil, err
+		}
 	}
 
 	// posts.id -> Post
@@ -203,16 +229,29 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 	}
 
+	// users.id -> User
+	userMap := make(map[int]User)
+	for _, user := range usersInPostResults {
+		if _, ok := userMap[user.ID]; !ok {
+			userMap[user.ID] = User{}
+		}
+		userMap[user.ID] = user
+	}
+	for _, user := range usersInComments {
+		if _, ok := userMap[user.ID]; !ok {
+			userMap[user.ID] = User{}
+		}
+		userMap[user.ID] = user
+	}
+
+
 	posts := make([]Post, 0)
 	for _, p := range results {
 		commentsInPost := postMap[p.ID].Comments
 		p.CommentCount = len(commentsInPost)
 
 		for i := 0; i < len(commentsInPost); i++ {
-			err := db.Get(&commentsInPost[i].User, "SELECT * FROM `users` WHERE `id` = ?", commentsInPost[i].UserID)
-			if err != nil {
-				return nil, err
-			}
+			commentsInPost[i].User = userMap[commentsInPost[i].UserID]
 		}
 
 		// reverse
@@ -221,17 +260,11 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 
 		p.Comments = commentsInPost
-
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
+		p.User = userMap[p.UserID]
 		p.CSRFToken = csrfToken
 
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
+		posts = append(posts, p)
+
 		if len(posts) >= postsPerPage {
 			break
 		}
